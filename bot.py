@@ -20,4 +20,5 @@ def find_best_move(board_fen: str, eval_model):
 
 		board.pop()
 
+	print(f"Best move is: {best_move}, and it gives eval of: {best_eval}")
 	return best_move
