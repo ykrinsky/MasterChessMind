@@ -26,6 +26,7 @@ import os
 import logging
 import random
 
+
 import torch
 import pandas as pd
 
@@ -40,27 +41,27 @@ MAX_LEAD_SCORE = 15
 HIDDEN_LAYER_SIZE = 512
 BATCH_SIZE = 64
 TESTSET_SIZE = 2500
+EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
 
 IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 
 if IN_GOOGLE_COLAB:
-    print("Running in google colab")
-    # EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/tactic_evals_short.csv"
-    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/tactic_evals.csv"
-    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessDataShort.csv"
-    DATASET_SIZE = 4_500_000
+    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData12M.csv"
+    DATASET_SIZE = 10_000_000
+    DATASET_SIZE = 3_000_000
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
+    CPU_CORES_COUNT = os.cpu_count()
 else:
-    print("NOT in google colab")
     EVALUATIONS_PATH = 'C:\\Users\\ykrin\\source\\repos\\chess_ai_ml\\res\\chess_eval\\tactic_evals.csv'
     DATASET_SIZE = 2_000
     FILEPATH = ""
+    CPU_CORES_COUNT = 1
 
 #DATASET_SIZE = 1_250_000
-EPOCHS_COUNT = 200
+EPOCHS_COUNT = 50
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-print(f"Using {DEVICE} device")
+
 
 def fen_to_bitboard_tensor(fen: str):
     # Initialize bitboards for different piece types
@@ -162,6 +163,8 @@ def fen_to_bitboard_tensor(fen: str):
 
 
 class ChessEvaluationsDataset(Dataset):
+    DEFAULT_ITEM = ("r1bqk2r/pppp1ppp/2n1pn2/3P4/1b2P3/2N2Q2/PPP2PPP/R1B1KBNR b KQkq - 3 5", -0.6)
+
     def __init__(self, evaluations_file: str, is_for_test = False):
         all_evaluations = pd.read_csv(evaluations_file)
         # TODO: Deal with ending positions and specifically mates (#)
@@ -172,6 +175,7 @@ class ChessEvaluationsDataset(Dataset):
             relevant_evaluations = relevant_evaluations[:DATASET_SIZE]
 
         self.evaluations = relevant_evaluations
+        """
         all_fens = [] 
         all_evals = [] 
         timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
@@ -197,6 +201,7 @@ class ChessEvaluationsDataset(Dataset):
 
         timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
         logging.info(f"Finished loading all dataset!! Finished at {timestamp}")
+        """
 
         #import IPython; IPython.embed()
 
@@ -205,22 +210,27 @@ class ChessEvaluationsDataset(Dataset):
         return len(self.evaluations)
 
     def __getitem__(self, index: int):
-        return self.fens_tensor[index].to(torch.float32), self.evals_tensor[index].to(torch.float32)
-        """
-        fen = self.evaluations.iloc[index]['FEN']
-    	raw_eval_score = self.evaluations.iloc[index]['Evaluation']
-    	eval_score = int(raw_eval_score) / CENTIPAWN_UNIT
-    	eval_score = max(eval_score, -MAX_LEAD_SCORE)
-    	eval_score = min(eval_score, MAX_LEAD_SCORE)
-    	# eval_score = eval_score / 10
+        # return self.fens_tensor[index].to(torch.float32), self.evals_tensor[index].to(torch.float32)
+        try:
+            raw_fen = self.evaluations.iloc[index]['FEN']
+            raw_eval_score = self.evaluations.iloc[index]['Evaluation']
+            eval_score = int(raw_eval_score) / CENTIPAWN_UNIT
+            eval_score = max(eval_score, -MAX_LEAD_SCORE)
+            eval_score = min(eval_score, MAX_LEAD_SCORE)
 
-    	eval_tensor = torch.tensor([eval_score]).to(DEVICE)
+            eval_tensor = torch.tensor([eval_score]).to(DEVICE, dtype=torch.float32)
+            bitboard_tensor = fen_to_bitboard_tensor(raw_fen).to(DEVICE, dtype=torch.float32)
 
-    	bitboard_tensor = fen_to_bitboard_tensor(fen).to(DEVICE)
-    	# print(f"Got item from index: {index}, eval: {eval_tensor}, bitboard: {bitboard_tensor}")
+        except Exception as e:
+            logging.exception("Raised exception when trying to load item from chess dataset, using default item instead")
+            bitboard_tensor = fen_to_bitboard_tensor(self.DEFAULT_ITEM[0]).to(DEVICE, dtype=torch.float32)
+            eval_tensor = torch.tensor([self.DEFAULT_ITEM[1]]).to(DEVICE, dtype=torch.float32)
 
-    	return bitboard_tensor, eval_tensor
-        """
+        # print(f"Got item from index: {index}, eval: {eval_tensor}, bitboard: {bitboard_tensor}")
+        return bitboard_tensor, eval_tensor
+
+
+
 
 
 class NeuralNetwork(nn.Module):
@@ -260,6 +270,7 @@ def train_loop(dataloader, model, loss_fn, optimizer):
         if batch % 1000 == 0:
             loss, current = loss.item(), (batch + 1) * len(board_positions)
             logging.info(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
 
 def manual_test(model):
     board_to_eval = {
@@ -313,7 +324,7 @@ def print_model_param(model):
 def train_network(model, train_dataloader, test_dataloader):
     loss_fn = nn.MSELoss()
 	# learning_rate = 1e-3
-    learning_rate = 0.05
+    learning_rate = 0.01
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     epochs = EPOCHS_COUNT
     for t in range(epochs):
@@ -322,7 +333,7 @@ def train_network(model, train_dataloader, test_dataloader):
         train_loop(train_dataloader, model, loss_fn, optimizer)
         manual_test(model)
         test_loop(test_dataloader, model, loss_fn)
-        if t % 10 == 0:
+        if t % EPOCH_SAVE_INTERVAL == 0:
             save_model(model)
         logger = logging.getLogger()
         for handler in logger.handlers:
@@ -377,9 +388,18 @@ def setup_logging():
     logger.debug("This debug message will only appear in the log file.")
 
 if __name__ == "__main__":
+    print("Starting to run first process")
+    if IN_GOOGLE_COLAB: 
+        print("Running in google colab")
+    else:
+        print("NOT in google colab")
+    print(f"Using {DEVICE} device")
+    print(f"Number of available CPU cores: {CPU_CORES_COUNT}")
     setup_logging()
+    # Force using spawn method for cuda (a must have when using multiple workers for loading)
+    torch.multiprocessing.set_start_method('spawn', force=True)
     chess_dataset = ChessEvaluationsDataset(EVALUATIONS_PATH)
-    train_dataloader = DataLoader(chess_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    train_dataloader = DataLoader(chess_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=3)
     chess_test_dataset = ChessEvaluationsDataset(EVALUATIONS_PATH, is_for_test=True)
     test_dataloader = DataLoader(chess_test_dataset, batch_size=BATCH_SIZE, shuffle=True)
     model = NeuralNetwork().to(DEVICE)
