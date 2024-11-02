@@ -14,6 +14,7 @@ early stopping function (when loss is under 1 for example)
 read again the researches
 learn how to streamline data better to the GPU
 Add logging or pring loss of training set over time.
+Change loss function to percentage of be in the range of +-2.
 """
 
 # Input layer - FEN to bitboard
@@ -25,10 +26,13 @@ import time
 import os
 import logging
 import random
+import sys
+import multiprocessing as mp
 
 
 import torch
 import pandas as pd
+import numpy as np
 
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
@@ -47,23 +51,24 @@ IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 
 if IN_GOOGLE_COLAB:
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData12M.csv"
-    DATASET_SIZE = 10_000_000
-    DATASET_SIZE = 3_000_000
+    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
+    TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_10K.csv"
+    DATASET_SIZE = 12_000_000
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
     CPU_CORES_COUNT = os.cpu_count()
 else:
-    EVALUATIONS_PATH = 'C:\\Users\\ykrin\\source\\repos\\chess_ai_ml\\res\\chess_eval\\tactic_evals.csv'
-    DATASET_SIZE = 2_000
+    EVALUATIONS_PATH = 'C:\\Users\\ykrin\\source\\repos\\chess_ai_ml\\res\\chess_eval\\short_tactics_test_10K.csv'
+    TEST_EVALUATIONS_PATH = 'C:\\Users\\ykrin\\source\\repos\\chess_ai_ml\\res\\chess_eval\\short_tactics_test_10K.csv'
+    DATASET_SIZE = 100_000
     FILEPATH = ""
     CPU_CORES_COUNT = 1
 
-#DATASET_SIZE = 1_250_000
 EPOCHS_COUNT = 50
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def fen_to_bitboard_tensor(fen: str):
+def fen_to_bitboard(fen: str):
     # Initialize bitboards for different piece types
     empty = 0
     white_pawns = 0
@@ -156,79 +161,92 @@ def fen_to_bitboard_tensor(fen: str):
     # empty = ~occupancy & 0xFFFFFFFFFFFFFFFF
 
     full_board_bits = pieces_board_bits + turn_bits + castling_bits
-    full_board_tensor = torch.tensor(full_board_bits, dtype=torch.float32)
-    #import IPython;IPython.embed()
+    board_array = np.array(full_board_bits, dtype=np.bool_)
 
-    return full_board_tensor
+    return board_array
 
+def _process_chunk(chunk, shared_list):
+    logging.basicConfig(level=logging.INFO, format='%(processName)s: %(message)s')
+    timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
+    logging.info(f"Starting to load chunk, starting loading on {timestamp}, chunk index: {chunk.index}")
+    print(f"Starting to load chunk, starting loading on {timestamp}, chunk index: {chunk.index}", flush=True)
+    sys.stdout.flush()  # Explicitly flush the output buffer to overcome threading problems
 
-class ChessEvaluationsDataset(Dataset):
-    DEFAULT_ITEM = ("r1bqk2r/pppp1ppp/2n1pn2/3P4/1b2P3/2N2Q2/PPP2PPP/R1B1KBNR b KQkq - 3 5", -0.6)
-
-    def __init__(self, evaluations_file: str, is_for_test = False):
-        all_evaluations = pd.read_csv(evaluations_file)
-        # TODO: Deal with ending positions and specifically mates (#)
-        relevant_evaluations = all_evaluations.loc[~all_evaluations['Evaluation'].astype(str).str.contains('#')]
-        if is_for_test:
-            relevant_evaluations = relevant_evaluations[::-1][:TESTSET_SIZE]
-        else:
-            relevant_evaluations = relevant_evaluations[:DATASET_SIZE]
-
-        self.evaluations = relevant_evaluations
-        """
-        all_fens = [] 
-        all_evals = [] 
-        timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
-        logging.info(f"Starting to load dataset. Will load all to GPU, starting loading on {timestamp}")
-        # for fen
-        for index, data in enumerate(relevant_evaluations.iloc):
-            if index % 200_000 == 0:
-                logging.debug(f"Loaded until now, {index} positions")
+    # TODO: Deal with ending positions and specifically mates (#)
+    relevant_evaluations = chunk.loc[~chunk['Evaluation'].astype(str).str.contains('#')]
+    all_fens = [] 
+    all_evals = [] 
+    for data in relevant_evaluations.iloc:
+        try:
             fen = data['FEN']
-            #bitboard = fen_to_bitboard_tensor(fen).tolist()
-            bitboard = fen_to_bitboard_tensor(fen).to(dtype=torch.bool)
-            all_fens.append(bitboard)
+            bitboard = fen_to_bitboard(fen)
 
             raw_eval_score = data['Evaluation']
             eval_score = int(raw_eval_score) / CENTIPAWN_UNIT
             eval_score = max(eval_score, -MAX_LEAD_SCORE)
             eval_score = min(eval_score, MAX_LEAD_SCORE)
-            eval_tensor = torch.tensor([eval_score], dtype=torch.int8, device=DEVICE)
-            all_evals.append(eval_tensor)
+        except ValueError as e:
+            logging.warning(f"Found problematic item in dataset: fen - {fen}, score - {raw_eval_score}. Skipping")
+            continue
 
-        self.fens_tensor = torch.stack(all_fens).to(DEVICE)
-        self.evals_tensor = torch.stack(all_evals).to(DEVICE)
+        all_fens.append(bitboard)
+        all_evals.append(eval_score)
+
+    timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
+    logging.info(f"Finished to load chunk, finished loading on {timestamp}, chunk index: {chunk.index}")
+    print(f"Finished to load chunk, finished loading on {timestamp}, chunk index: {chunk.index}", flush=True)
+    sys.stdout.flush()  # Explicitly flush the output buffer
+
+    shared_list.append((all_fens, all_evals))
+    logging.debug(f"Returning from multi process _process_chunk")
+    return 
+
+class ChessEvaluationsDataset(Dataset):
+    DEFAULT_ITEM = ("r1bqk2r/pppp1ppp/2n1pn2/3P4/1b2P3/2N2Q2/PPP2PPP/R1B1KBNR b KQkq - 3 5", -0.6)
+
+    def __init__(self, evaluations_file: str):
+        csv_iter = pd.read_csv(evaluations_file, chunksize=10_000)
 
         timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
-        logging.info(f"Finished loading all dataset!! Finished at {timestamp}")
-        """
+        logging.info(f"Starting to load dataset. Will load all to GPU, starting loading on {timestamp}")
+        sys.stdout.flush()  # Explicitly flush the output buffer
+        parsed_data = []
 
-        #import IPython; IPython.embed()
+        with mp.Manager() as manager:
+            processes = []
+            shared_list = manager.list()
+            for i, chunk in enumerate(csv_iter):
+                if len(processes) >= CPU_CORES_COUNT:
+                    processes.pop(0).join()
+                
+                p = mp.Process(target=_process_chunk, args=(chunk, shared_list))
+                processes.append(p)
+                p.start()
 
+            for p in processes:
+                p.join()
+
+            parsed_data = list(shared_list)
+
+        timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
+        logging.info(f"Finished loading all dataset on {timestamp}")
+
+        fens_arrays = [data[0] for data in parsed_data]
+        evals_arrays = [data[1] for data in parsed_data]
+        fens_data = np.concatenate(fens_arrays, axis=0)
+        evals_data = np.concatenate(evals_arrays, axis=0)
+        self.fens_tensor = torch.from_numpy(fens_data).to(DEVICE, dtype=torch.bool)
+        self.evals_tensor = torch.from_numpy(evals_data).to(DEVICE, dtype=torch.int8).view(-1, 1)
+        #import ipdb;ipdb.set_trace()
+        assert len(self.fens_tensor)==len(self.evals_tensor), "Unequal fens and evaluations, unexpected and should be debugged"
+
+        logging.info(f"Finished parsing data!")
 
     def __len__(self):
-        return len(self.evaluations)
+        return len(self.fens_tensor)
 
     def __getitem__(self, index: int):
-        # return self.fens_tensor[index].to(torch.float32), self.evals_tensor[index].to(torch.float32)
-        try:
-            raw_fen = self.evaluations.iloc[index]['FEN']
-            raw_eval_score = self.evaluations.iloc[index]['Evaluation']
-            eval_score = int(raw_eval_score) / CENTIPAWN_UNIT
-            eval_score = max(eval_score, -MAX_LEAD_SCORE)
-            eval_score = min(eval_score, MAX_LEAD_SCORE)
-
-            eval_tensor = torch.tensor([eval_score]).to(DEVICE, dtype=torch.float32)
-            bitboard_tensor = fen_to_bitboard_tensor(raw_fen).to(DEVICE, dtype=torch.float32)
-
-        except Exception as e:
-            logging.exception("Raised exception when trying to load item from chess dataset, using default item instead")
-            bitboard_tensor = fen_to_bitboard_tensor(self.DEFAULT_ITEM[0]).to(DEVICE, dtype=torch.float32)
-            eval_tensor = torch.tensor([self.DEFAULT_ITEM[1]]).to(DEVICE, dtype=torch.float32)
-
-        # print(f"Got item from index: {index}, eval: {eval_tensor}, bitboard: {bitboard_tensor}")
-        return bitboard_tensor, eval_tensor
-
+        return self.fens_tensor[index].to(torch.float32), self.evals_tensor[index].to(torch.float32)
 
 
 
@@ -258,9 +276,9 @@ def train_loop(dataloader, model, loss_fn, optimizer):
     model.train()
     for batch, (board_positions, real_evaluations) in enumerate(dataloader):
         # Compute prediction and loss
-        #import pdb;pdb.set_trace()
         predictions = model(board_positions)
         loss = loss_fn(predictions, real_evaluations)
+        #import ipdb;ipdb.set_trace()
 
         # Backpropagation
         loss.backward()
@@ -279,7 +297,7 @@ def manual_test(model):
     }
     test_results = []
     for board, eval in board_to_eval.items():
-        board_tensor = fen_to_bitboard_tensor(board).to(DEVICE)
+        board_tensor = torch.from_numpy(fen_to_bitboard(board)).to(DEVICE, dtype=torch.float32)
         result = model(board_tensor).item()
         logging.info(f"Test result: {result}, should be: {eval}")
         result_diff = abs(result-eval)
@@ -369,7 +387,7 @@ def setup_logging():
     file_handler.setLevel(logging.DEBUG)
     file_handler2.setLevel(logging.DEBUG)
 
-    formatter = logging.Formatter('%(levelname)s - %(asctime)s - %(message)s')
+    formatter = logging.Formatter('%(levelname)s - %(asctime)s - %(processName)s - %(message)s')
     console_handler.setFormatter(formatter)
     file_handler.setFormatter(formatter)
     file_handler2.setFormatter(formatter)
@@ -396,11 +414,9 @@ if __name__ == "__main__":
     print(f"Using {DEVICE} device")
     print(f"Number of available CPU cores: {CPU_CORES_COUNT}")
     setup_logging()
-    # Force using spawn method for cuda (a must have when using multiple workers for loading)
-    torch.multiprocessing.set_start_method('spawn', force=True)
     chess_dataset = ChessEvaluationsDataset(EVALUATIONS_PATH)
-    train_dataloader = DataLoader(chess_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=3)
-    chess_test_dataset = ChessEvaluationsDataset(EVALUATIONS_PATH, is_for_test=True)
+    train_dataloader = DataLoader(chess_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    chess_test_dataset = ChessEvaluationsDataset(TEST_EVALUATIONS_PATH)
     test_dataloader = DataLoader(chess_test_dataset, batch_size=BATCH_SIZE, shuffle=True)
     model = NeuralNetwork().to(DEVICE)
     train_network(model, train_dataloader, test_dataloader)

@@ -1,4 +1,5 @@
 import chess
+import torch
 
 import notes
 
@@ -11,8 +12,9 @@ def find_best_move(board_fen: str, eval_model):
 		board.push(move)
 		possible_fen = board.fen()
 
-		fen_tensor = notes.fen_to_bitboard_tensor(possible_fen)
-		new_eval = eval_model(fen_tensor)
+		bitboard = notes.fen_to_bitboard(possible_fen)
+		bitboard_tensor = torch.from_numpy(bitboard).to(notes.DEVICE, dtype=torch.float32)
+		new_eval = eval_model(bitboard_tensor)
 		print(f"Move: {move} give score of: {new_eval}")
 		if new_eval > best_eval:
 			best_move = move
