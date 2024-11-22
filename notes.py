@@ -1,26 +1,3 @@
-"""
-TODO:
-* Think on how to normalize the evaluations and how to create the output layer !
-* Train the network.
-* Deal with evaluation with #
-* Think on different neural network you can do with chess.
-* Add minimax algorithm to move calculation.
-* See what is workers and if it can speed up the training
-* DONE - look better at loss function (== learned that it the mean squared error, and loss of 3 for example is pretty good, as it means ~1.7 error)
-* maybe add option to play against the bot
-
-download the model
-early stopping function (when loss is under 1 for example)
-read again the researches
-learn how to streamline data better to the GPU
-Add logging or pring loss of training set over time.
-Change loss function to percentage of be in the range of +-2.
-"""
-
-# Input layer - FEN to bitboard
-# FEN example - N2k1bnr/3p1ppp/b1n1p3/8/4P3/P4N2/1PP2PPP/R1B1K2R b KQ - 0 12
-# N2k1bnr/3p1ppp/b1n1p3/8/4P3/P4N2/1PP2PPP/R1B1K2R         b                  KQ                   			-			 		     0        				 12
-# --------------- pieces positions ---------------------player turn----castling rights---------possible en passsent targets--------half move clock-------full move number-------------
 import datetime
 import time
 import os
@@ -52,7 +29,8 @@ IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 if IN_GOOGLE_COLAB:
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData12M.csv"
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
-    TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_10K.csv"
+    #TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_10K.csv"
+    TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_300K.csv"
     DATASET_SIZE = 12_000_000
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
     CPU_CORES_COUNT = os.cpu_count()
@@ -69,7 +47,11 @@ DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 
 
 def fen_to_bitboard(fen: str):
-    # Initialize bitboards for different piece types
+    """Converts a FEN string to a board binary representation.
+    FEN example - N2k1bnr/3p1ppp/b1n1p3/8/4P3/P4N2/1PP2PPP/R1B1K2R b KQ - 0 12
+    N2k1bnr/3p1ppp/b1n1p3/8/4P3/P4N2/1PP2PPP/R1B1K2R         b                  KQ                   			-			 		     0        				 12
+    --------------- pieces positions ---------------------player turn----castling rights---------possible en passsent targets--------half move clock-------full move number-------------
+    """
     empty = 0
     white_pawns = 0
     white_knights = 0
@@ -84,7 +66,6 @@ def fen_to_bitboard(fen: str):
     black_queens = 0
     black_kings = 0
 
-    # Split FEN into parts
     fen_board_part, fen_turn_part, fen_castling_part, *_ = fen.split()
 
     # Translate FEN board representation to bitboards
@@ -169,10 +150,8 @@ def _process_chunk(chunk, shared_list):
     logging.basicConfig(level=logging.INFO, format='%(processName)s: %(message)s')
     timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     logging.info(f"Starting to load chunk, starting loading on {timestamp}, chunk index: {chunk.index}")
-    print(f"Starting to load chunk, starting loading on {timestamp}, chunk index: {chunk.index}", flush=True)
-    sys.stdout.flush()  # Explicitly flush the output buffer to overcome threading problems
 
-    # TODO: Deal with ending positions and specifically mates (#)
+    # TODO: Deal with ending positions and specifically mates (#). Replace by maximizing the player leading, '#+1' => +15, and '#-3' => -15.
     relevant_evaluations = chunk.loc[~chunk['Evaluation'].astype(str).str.contains('#')]
     all_fens = [] 
     all_evals = [] 
@@ -194,8 +173,6 @@ def _process_chunk(chunk, shared_list):
 
     timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     logging.info(f"Finished to load chunk, finished loading on {timestamp}, chunk index: {chunk.index}")
-    print(f"Finished to load chunk, finished loading on {timestamp}, chunk index: {chunk.index}", flush=True)
-    sys.stdout.flush()  # Explicitly flush the output buffer
 
     shared_list.append((all_fens, all_evals))
     logging.debug(f"Returning from multi process _process_chunk")
@@ -209,7 +186,6 @@ class ChessEvaluationsDataset(Dataset):
 
         timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
         logging.info(f"Starting to load dataset. Will load all to GPU, starting loading on {timestamp}")
-        sys.stdout.flush()  # Explicitly flush the output buffer
         parsed_data = []
 
         with mp.Manager() as manager:
@@ -278,7 +254,6 @@ def train_loop(dataloader, model, loss_fn, optimizer):
         # Compute prediction and loss
         predictions = model(board_positions)
         loss = loss_fn(predictions, real_evaluations)
-        #import ipdb;ipdb.set_trace()
 
         # Backpropagation
         loss.backward()
@@ -288,7 +263,6 @@ def train_loop(dataloader, model, loss_fn, optimizer):
         if batch % 1000 == 0:
             loss, current = loss.item(), (batch + 1) * len(board_positions)
             logging.info(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
 
 def manual_test(model):
     board_to_eval = {
@@ -314,30 +288,34 @@ def test_loop(dataloader, model, loss_fn):
     test_avg_loss = 0
     samples_tested = 0
     batches_tested = 0
+    good_tests = 0
+    good_eval_bar = 2
+    #stopping_after = 200_000
 
     # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
     # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
-        for chess_boards, boards_evals in dataloader:
-            pred = model(chess_boards)
-            test_avg_loss += loss_fn(pred, boards_evals).item()
+        for chess_board, board_eval in dataloader:
+            pred = model(chess_board)
+            test_avg_loss += loss_fn(pred, board_eval).item()
+
+            diff_found = abs(pred-board_eval)
+            for diff_tensor in diff_found.view(-1):
+                if float(diff_tensor) < good_eval_bar:
+                    good_tests += 1
+
             batches_tested += 1
             samples_tested = batches_tested * dataloader.batch_size
-            if samples_tested >= 1_000:
-            	break
+            #if samples_tested >= 1_000:
+            #	break
 
     test_avg_loss /= batches_tested
     logging.info(f"Test Error: \n Avg loss: {test_avg_loss:>8f} \n Test took: {time.time() - test_start_time} seconds")
+    logging.info(f"Good evals percentage: {good_tests/samples_tested:>5f}, bar used: {good_eval_bar}")
 
     if test_avg_loss < 3:
         logging.info(f"Found model with avg loss of: {test_avg_loss}, saving it.")
         save_model(model)
-
-def print_model_param(model):
-	print(f"Model structure: {model}\n\n")
-
-	for name, param in model.named_parameters():
-    		print(f"Layer: {name} | Size: {param.size()} | Values : {param[:2]} \n")
 
 def train_network(model, train_dataloader, test_dataloader):
     loss_fn = nn.MSELoss()
