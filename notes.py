@@ -1,3 +1,9 @@
+"""
+TODO: Elaborate in the notebook on steps done to prevent overfitting. 
+(Increasing data size, changing the neural network structure, adding dropouts, weight_decay and more)
+Elaborate in the notebook on how we tested the results (winning and such).
+Visualise the data.
+"""
 import datetime
 import time
 import os
@@ -19,19 +25,20 @@ from torch.utils.data import Dataset, DataLoader
 BITBOARD_SIZE = 773
 CENTIPAWN_UNIT = 100
 MAX_LEAD_SCORE = 15
-HIDDEN_LAYER_SIZE = 512
-BATCH_SIZE = 64
+HIDDEN_LAYER_SIZE = 256
+BATCH_SIZE = 128
 TESTSET_SIZE = 2500
 EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
 
 IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 
 if IN_GOOGLE_COLAB:
-    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData12M.csv"
+    DATASET_SIZE = "12M"
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
+    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData12M.csv"
+    #EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData5M.csv"
     #TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_10K.csv"
     TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_300K.csv"
-    DATASET_SIZE = 12_000_000
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
     CPU_CORES_COUNT = os.cpu_count()
 else:
@@ -41,7 +48,7 @@ else:
     FILEPATH = ""
     CPU_CORES_COUNT = 1
 
-EPOCHS_COUNT = 50
+EPOCHS_COUNT = 100
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -146,6 +153,20 @@ def fen_to_bitboard(fen: str):
 
     return board_array
 
+
+def is_accurate_prediction(score: float, prediction: float) -> bool:
+    # Check if both are winning
+    if score > 1.5 and prediction > 1.5:
+        return True
+    # Check if both are losing
+    if score < -1.5 and prediction < -1.5:
+        return True
+    # Check if both are draw
+    if abs(score) < 1.5 and abs(prediction) < -1.5:
+        return True
+    
+    return False
+
 def _process_chunk(chunk, shared_list):
     logging.basicConfig(level=logging.INFO, format='%(processName)s: %(message)s')
     timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
@@ -213,7 +234,6 @@ class ChessEvaluationsDataset(Dataset):
         evals_data = np.concatenate(evals_arrays, axis=0)
         self.fens_tensor = torch.from_numpy(fens_data).to(DEVICE, dtype=torch.bool)
         self.evals_tensor = torch.from_numpy(evals_data).to(DEVICE, dtype=torch.int8).view(-1, 1)
-        #import ipdb;ipdb.set_trace()
         assert len(self.fens_tensor)==len(self.evals_tensor), "Unequal fens and evaluations, unexpected and should be debugged"
 
         logging.info(f"Finished parsing data!")
@@ -233,8 +253,10 @@ class NeuralNetwork(nn.Module):
         self.linear_relu_stack = nn.Sequential(
             nn.Linear(in_features=BITBOARD_SIZE, out_features=HIDDEN_LAYER_SIZE),
             nn.ReLU(),
+            nn.Dropout(p=0.6),
             nn.Linear(in_features=HIDDEN_LAYER_SIZE, out_features=HIDDEN_LAYER_SIZE),
             nn.ReLU(),
+            nn.Dropout(p=0.6),
             nn.Linear(in_features=HIDDEN_LAYER_SIZE, out_features=1),
         )
 
@@ -249,7 +271,10 @@ def train_loop(dataloader, model, loss_fn, optimizer):
     size = len(dataloader.dataset)
     # Set the model to training mode - important for batch normalization and dropout layers
     # Unnecessary in this situation but added for best practices
+    train_start_time = time.time()
     model.train()
+    train_loss = 0
+    batches_tested = 0
     for batch, (board_positions, real_evaluations) in enumerate(dataloader):
         # Compute prediction and loss
         predictions = model(board_positions)
@@ -263,8 +288,15 @@ def train_loop(dataloader, model, loss_fn, optimizer):
         if batch % 1000 == 0:
             loss, current = loss.item(), (batch + 1) * len(board_positions)
             logging.info(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+            
+        train_loss += loss
+        batches_tested += 1
+
+    logging.info(f"Train Error: \n Avg loss: {train_loss/batches_tested:>8f} \n Test took: {time.time() - train_start_time} seconds")
+    
 
 def manual_test(model):
+    model.eval()
     board_to_eval = {
         'r1b1k2r/pppp1ppp/2n2q2/8/4P3/N4N2/PPP2PPP/R2QKB1R w KQkq - 0 8': 8.6,
         '3r4/5k1p/2p3p1/1p1q4/1P2p3/Q3P2P/3p1PP1/3R2K1 b - - 9 43': -3.6
@@ -281,47 +313,54 @@ def manual_test(model):
     return avg_result
 
 def test_loop(dataloader, model, loss_fn):
-    # Set the model to evaluation mode - important for batch normalization and dropout layers
-    # Unnecessary in this situation but added for best practices
     test_start_time = time.time()
+    # Set the model to evaluation mode - important for batch normalization and dropout layers
     model.eval()
-    test_avg_loss = 0
+    test_loss = 0
     samples_tested = 0
     batches_tested = 0
     good_tests = 0
+    in_range = 0
     good_eval_bar = 2
     #stopping_after = 200_000
 
     # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
     # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
-        for chess_board, board_eval in dataloader:
-            pred = model(chess_board)
-            test_avg_loss += loss_fn(pred, board_eval).item()
+        for chess_boards, boards_eval in dataloader:
+            predictions = model(chess_boards)
+            test_loss += loss_fn(predictions, boards_eval).item()
 
-            diff_found = abs(pred-board_eval)
+            diff_found = abs(predictions-boards_eval)
+            #import ipdb;ipdb.set_trace()
             for diff_tensor in diff_found.view(-1):
                 if float(diff_tensor) < good_eval_bar:
                     good_tests += 1
+
+            for board_eval, prediction in zip(boards_eval, predictions):
+                if is_accurate_prediction(int(board_eval), int(prediction)):
+                    in_range += 1
+
 
             batches_tested += 1
             samples_tested = batches_tested * dataloader.batch_size
             #if samples_tested >= 1_000:
             #	break
 
-    test_avg_loss /= batches_tested
-    logging.info(f"Test Error: \n Avg loss: {test_avg_loss:>8f} \n Test took: {time.time() - test_start_time} seconds")
-    logging.info(f"Good evals percentage: {good_tests/samples_tested:>5f}, bar used: {good_eval_bar}")
+    logging.info(f"Test Error: \n Avg loss: {test_loss/batches_tested:>8f} \n Test took: {time.time() - test_start_time} seconds")
+    logging.info(f"Good evals (by range) percentage: {good_tests/samples_tested * 100:>5f}, bar used: {good_eval_bar}")
+    logging.info(f"Good evals (by win/lose) percentage: {in_range/samples_tested * 100:>5f}")
 
-    if test_avg_loss < 3:
-        logging.info(f"Found model with avg loss of: {test_avg_loss}, saving it.")
+    if test_loss < 3:
+        logging.info(f"Found model with avg loss of: {test_loss}, saving it.")
         save_model(model)
 
 def train_network(model, train_dataloader, test_dataloader):
     loss_fn = nn.MSELoss()
 	# learning_rate = 1e-3
     learning_rate = 0.01
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-3)
     epochs = EPOCHS_COUNT
     for t in range(epochs):
         logging.info
