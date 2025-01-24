@@ -1,8 +1,6 @@
 """
-TODO: Elaborate in the notebook on steps done to prevent overfitting. 
-(Increasing data size, changing the neural network structure, adding dropouts, weight_decay and more)
-Elaborate in the notebook on how we tested the results (winning and such).
-Visualise the data.
+Finish all TODO's
+Train loss also doesn't decreases much :( check if there is a problem there.
 """
 import datetime
 import time
@@ -16,6 +14,8 @@ import multiprocessing as mp
 import torch
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
@@ -24,20 +24,20 @@ from torch.utils.data import Dataset, DataLoader
 
 BITBOARD_SIZE = 773
 CENTIPAWN_UNIT = 100
-MAX_LEAD_SCORE = 15
-HIDDEN_LAYER_SIZE = 256
+MAX_EVAL_SCORE = 1500
+HIDDEN_LAYER_SIZE = 512
+DROPOUT_COUNT = 0.2
 BATCH_SIZE = 128
 TESTSET_SIZE = 2500
 EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
+GOOD_EVAL_DIFF = 2
 
 IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 
 if IN_GOOGLE_COLAB:
     DATASET_SIZE = "12M"
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
-    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData12M.csv"
-    #EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData5M.csv"
-    #TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_10K.csv"
+    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/merged_fixed_dataset.csv"
     TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_300K.csv"
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
     CPU_CORES_COUNT = os.cpu_count()
@@ -79,19 +79,19 @@ def fen_to_bitboard(fen: str):
 
     # Start from the 8th rank and a-file (0-based index)
     row = 7  
-    col = 0 
+    file = 0 
 
     for char in fen_board_part:
         if char == '/':
 			# Continue to next line
             row -= 1
-            col = 0
+            file = 0
         elif char.isnumeric():
         	# Numeric means empty spaces, so we skip accordingly to the next piece in row.
-            col += int(char)
+            file += int(char)
         else:
         	# Convert rank and file to a square index
-            square = row * 8 + col 
+            square = row * 8 + file 
 
             if char == 'P':
                 white_pawns |= 1 << square
@@ -118,19 +118,19 @@ def fen_to_bitboard(fen: str):
             elif char == 'k':
                 black_kings |= 1 << square
 
-            col += 1
+            file += 1
 
     pieces = [
     	white_pawns, white_knights, white_bishops, white_rooks, white_queens, white_kings, 
     	black_pawns, black_knights, black_bishops, black_rooks, black_queens, black_kings
     ]
-    pieces_board_bits = []
+    board_pieces_bits = []
     for piece in pieces:
     	# Pad to 64 bits for each piece and skip the '0b' prefix
     	piece_bits_str = bin(piece)[2:].zfill(64)
     	piece_bits = [int(bit) for bit in piece_bits_str]
 
-    	pieces_board_bits.extend(piece_bits)
+    	board_pieces_bits.extend(piece_bits)
 
     # Determine player turn
     turn_bits = [1 if fen_turn_part == 'w' else 0]
@@ -144,49 +144,68 @@ def fen_to_bitboard(fen: str):
 
     castling_bits = [white_kingside_castle, white_queenside_castle, black_kingside_castle, black_queenside_castle]
 
-    # Calculate occupancy board (and it's investion to get emptry squares) - NOT SURE IS NEEDED
-    # occupancy = pawns | knights | bishops | rooks | queens | kings
-    # empty = ~occupancy & 0xFFFFFFFFFFFFFFFF
-
-    full_board_bits = pieces_board_bits + turn_bits + castling_bits
+    full_board_bits = board_pieces_bits + turn_bits + castling_bits
     board_array = np.array(full_board_bits, dtype=np.bool_)
 
     return board_array
 
-
 def is_accurate_prediction(score: float, prediction: float) -> bool:
-    # Check if both are winning
-    if score > 1.5 and prediction > 1.5:
-        return True
-    # Check if both are losing
-    if score < -1.5 and prediction < -1.5:
-        return True
-    # Check if both are draw
-    if abs(score) < 1.5 and abs(prediction) < -1.5:
+    diff = abs(score-prediction)
+    if diff < GOOD_EVAL_DIFF:
         return True
     
     return False
 
+
+def _preprocess_data(evaluation_file: str):
+    df = pd.read_csv(evaluation_file)
+    # Deal with ending positions and specifically mates (#). Replace by maximizing the player leading, '#+1' => +1500, and '#-3' => -1500.
+    df['Evaluation'] = df['Evaluation'].astype(str)
+    df['Evaluation'] = df['Evaluation'].str.replace(r'#\+\d+', f'+{MAX_EVAL_SCORE}', regex=True)
+    df['Evaluation'] = df['Evaluation'].str.replace(r'#-\d+', f'-{MAX_EVAL_SCORE}', regex=True)
+
+    # Convert to numeric, setting invalid values to NaN
+    df['Evaluation'] = pd.to_numeric(df['Evaluation'], errors='coerce')
+    # Drop rows with NaN values
+    df = df.dropna(subset=['Evaluation'])
+
+    # Adjust score to be not under and over the max lead score to not over impact the training.
+    df['Evaluation'] = df['Evaluation'].clip(lower=-MAX_EVAL_SCORE, upper=MAX_EVAL_SCORE)
+
+    # Convert evaluation from centipawns unit to pawns unit
+    df['Evaluation'] = df['Evaluation'].astype(int)/CENTIPAWN_UNIT
+
+    # Draw how much evaluations there are in the dataset in each score 
+    df['Evaluation_int'] = df['Evaluation'].astype(int)
+    print(df['Evaluation_int'].value_counts())
+    df['Evaluation_int'].plot(kind="hist", bins=30, title='Chess Evaluation', edgecolor='black', xlabel='Values', ylabel='Frequency')
+    plt.show()
+
+    # Sample only specific amount from each column, to balance the data.
+    # Letting the user to choose the column to sample, according to the data histogram presented to him.
+    sampling_column = int(input("Enter column for sampling: "))
+    sample_size = df['Evaluation_int'].value_counts()[sampling_column]
+    print(f"Sampling {sample_size} from each column")
+    fixed_df = df.groupby('Evaluation_int').apply(lambda eval_col: eval_col.sample(n=min(sample_size, len(eval_col)), random_state=42))
+    fixed_df['Evaluation_int'].plot(kind="hist", bins=30, title='Fixed Chess Evaluation', edgecolor='black', xlabel='Values', ylabel='Frequency')
+    plt.show()
+    fixed_df.to_csv(f"{evaluation_file}.fixed", index=False)
+    return fixed_df
+
+
 def _process_chunk(chunk, shared_list):
-    logging.basicConfig(level=logging.INFO, format='%(processName)s: %(message)s')
     timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     logging.info(f"Starting to load chunk, starting loading on {timestamp}, chunk index: {chunk.index}")
 
-    # TODO: Deal with ending positions and specifically mates (#). Replace by maximizing the player leading, '#+1' => +15, and '#-3' => -15.
-    relevant_evaluations = chunk.loc[~chunk['Evaluation'].astype(str).str.contains('#')]
     all_fens = [] 
     all_evals = [] 
-    for data in relevant_evaluations.iloc:
+    for data in chunk.iloc:
         try:
             fen = data['FEN']
             bitboard = fen_to_bitboard(fen)
-
-            raw_eval_score = data['Evaluation']
-            eval_score = int(raw_eval_score) / CENTIPAWN_UNIT
-            eval_score = max(eval_score, -MAX_LEAD_SCORE)
-            eval_score = min(eval_score, MAX_LEAD_SCORE)
+            eval_score = int(data['Evaluation'])
         except ValueError as e:
-            logging.warning(f"Found problematic item in dataset: fen - {fen}, score - {raw_eval_score}. Skipping")
+            logging.warning(f"Found problematic item in dataset: fen - {fen}, score - {eval_score}. Skipping")
             continue
 
         all_fens.append(bitboard)
@@ -202,7 +221,7 @@ def _process_chunk(chunk, shared_list):
 class ChessEvaluationsDataset(Dataset):
     DEFAULT_ITEM = ("r1bqk2r/pppp1ppp/2n1pn2/3P4/1b2P3/2N2Q2/PPP2PPP/R1B1KBNR b KQkq - 3 5", -0.6)
 
-    def __init__(self, evaluations_file: str):
+    def __init__(self, evaluations_file: str, test_data_mode: bool = False):
         csv_iter = pd.read_csv(evaluations_file, chunksize=10_000)
 
         timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
@@ -216,6 +235,9 @@ class ChessEvaluationsDataset(Dataset):
                 if len(processes) >= CPU_CORES_COUNT:
                     processes.pop(0).join()
                 
+                train_chunk, test_chunk = train_test_split(chunk, test_size=0.2, random_state=15)
+                chunk = test_chunk if test_data_mode else train_chunk
+
                 p = mp.Process(target=_process_chunk, args=(chunk, shared_list))
                 processes.append(p)
                 p.start()
@@ -234,7 +256,7 @@ class ChessEvaluationsDataset(Dataset):
         evals_data = np.concatenate(evals_arrays, axis=0)
         self.fens_tensor = torch.from_numpy(fens_data).to(DEVICE, dtype=torch.bool)
         self.evals_tensor = torch.from_numpy(evals_data).to(DEVICE, dtype=torch.int8).view(-1, 1)
-        assert len(self.fens_tensor)==len(self.evals_tensor), "Unequal fens and evaluations, unexpected and should be debugged"
+        assert len(self.fens_tensor) == len(self.evals_tensor), "Unequal fens and evaluations, unexpected and should be debugged"
 
         logging.info(f"Finished parsing data!")
 
@@ -245,18 +267,16 @@ class ChessEvaluationsDataset(Dataset):
         return self.fens_tensor[index].to(torch.float32), self.evals_tensor[index].to(torch.float32)
 
 
-
-
 class NeuralNetwork(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear_relu_stack = nn.Sequential(
             nn.Linear(in_features=BITBOARD_SIZE, out_features=HIDDEN_LAYER_SIZE),
             nn.ReLU(),
-            nn.Dropout(p=0.6),
+            nn.Dropout(p=DROPOUT_COUNT),
             nn.Linear(in_features=HIDDEN_LAYER_SIZE, out_features=HIDDEN_LAYER_SIZE),
             nn.ReLU(),
-            nn.Dropout(p=0.6),
+            nn.Dropout(p=DROPOUT_COUNT),
             nn.Linear(in_features=HIDDEN_LAYER_SIZE, out_features=1),
         )
 
@@ -269,9 +289,8 @@ class NeuralNetwork(nn.Module):
 
 def train_loop(dataloader, model, loss_fn, optimizer):
     size = len(dataloader.dataset)
-    # Set the model to training mode - important for batch normalization and dropout layers
-    # Unnecessary in this situation but added for best practices
     train_start_time = time.time()
+    # Set the model to training mode - important for batch normalization and dropout layers
     model.train()
     train_loss = 0
     batches_tested = 0
@@ -319,9 +338,7 @@ def test_loop(dataloader, model, loss_fn):
     test_loss = 0
     samples_tested = 0
     batches_tested = 0
-    good_tests = 0
     in_range = 0
-    good_eval_bar = 2
     #stopping_after = 200_000
 
     # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
@@ -330,12 +347,6 @@ def test_loop(dataloader, model, loss_fn):
         for chess_boards, boards_eval in dataloader:
             predictions = model(chess_boards)
             test_loss += loss_fn(predictions, boards_eval).item()
-
-            diff_found = abs(predictions-boards_eval)
-            #import ipdb;ipdb.set_trace()
-            for diff_tensor in diff_found.view(-1):
-                if float(diff_tensor) < good_eval_bar:
-                    good_tests += 1
 
             for board_eval, prediction in zip(boards_eval, predictions):
                 if is_accurate_prediction(int(board_eval), int(prediction)):
@@ -348,8 +359,7 @@ def test_loop(dataloader, model, loss_fn):
             #	break
 
     logging.info(f"Test Error: \n Avg loss: {test_loss/batches_tested:>8f} \n Test took: {time.time() - test_start_time} seconds")
-    logging.info(f"Good evals (by range) percentage: {good_tests/samples_tested * 100:>5f}, bar used: {good_eval_bar}")
-    logging.info(f"Good evals (by win/lose) percentage: {in_range/samples_tested * 100:>5f}")
+    logging.info(f"Good evals (by range) percentage: {in_range/samples_tested * 100:>5f}")
 
     if test_loss < 3:
         logging.info(f"Found model with avg loss of: {test_loss}, saving it.")
@@ -393,28 +403,22 @@ def continue_train(model, train_data, test_data):
 
 def setup_logging():
     console_handler = logging.StreamHandler()
-    log_path = os.path.join(FILEPATH,'ML_chess_training.log')
+    log_path = os.path.join(FILEPATH,'ML_chess_training.log') if IN_GOOGLE_COLAB else 'log.txt'
     print(f"Logging in {log_path}")
-    log_path2 = "/content/drive/My Drive/ML_chess_training_2.log" if IN_GOOGLE_COLAB else 'log.txt'
-    print(f"Logging in {log_path2}")
     file_handler = logging.FileHandler(log_path)
-    file_handler2 = logging.FileHandler(log_path2)
 
     console_handler.setLevel(logging.INFO)
     file_handler.setLevel(logging.DEBUG)
-    file_handler2.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter('%(levelname)s - %(asctime)s - %(processName)s - %(message)s')
     console_handler.setFormatter(formatter)
     file_handler.setFormatter(formatter)
-    file_handler2.setFormatter(formatter)
 
     #logger = logging.getLogger('ML_trainer_logger')
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
-    logger.addHandler(file_handler2)
 
     logging.info("Logger is configured")
 
@@ -423,17 +427,16 @@ def setup_logging():
     logger.debug("This debug message will only appear in the log file.")
 
 if __name__ == "__main__":
-    print("Starting to run first process")
     if IN_GOOGLE_COLAB: 
         print("Running in google colab")
     else:
-        print("NOT in google colab")
+        print("Running outside of google colab")
     print(f"Using {DEVICE} device")
     print(f"Number of available CPU cores: {CPU_CORES_COUNT}")
     setup_logging()
     chess_dataset = ChessEvaluationsDataset(EVALUATIONS_PATH)
     train_dataloader = DataLoader(chess_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    chess_test_dataset = ChessEvaluationsDataset(TEST_EVALUATIONS_PATH)
+    chess_test_dataset = ChessEvaluationsDataset(EVALUATIONS_PATH, test_data_mode=True)
     test_dataloader = DataLoader(chess_test_dataset, batch_size=BATCH_SIZE, shuffle=True)
     model = NeuralNetwork().to(DEVICE)
     train_network(model, train_dataloader, test_dataloader)
