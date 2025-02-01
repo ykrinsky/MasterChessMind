@@ -1,6 +1,7 @@
 """
 Finish all TODO's
 Train loss also doesn't decreases much :( check if there is a problem there.
+TODO: Fix bot.py to know if your are white or black.
 """
 import datetime
 import time
@@ -25,11 +26,13 @@ from torch.utils.data import Dataset, DataLoader
 BITBOARD_SIZE = 773
 CENTIPAWN_UNIT = 100
 MAX_EVAL_SCORE = 1500
-HIDDEN_LAYER_SIZE = 512
-DROPOUT_COUNT = 0.2
-BATCH_SIZE = 128
+HIDDEN_LAYER_SIZE = 1024
+DROPOUT_COUNT = 0.1
+# BATCH_SIZE = 128
+BATCH_SIZE = 512
 TESTSET_SIZE = 2500
 EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
+EPOCHS_COUNT = 100
 GOOD_EVAL_DIFF = 2
 
 IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
@@ -37,7 +40,7 @@ IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 if IN_GOOGLE_COLAB:
     DATASET_SIZE = "12M"
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
-    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/merged_fixed_dataset.csv"
+    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/merged_big_fixed_dataset.csv"
     TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_300K.csv"
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
     CPU_CORES_COUNT = os.cpu_count()
@@ -47,8 +50,6 @@ else:
     DATASET_SIZE = 100_000
     FILEPATH = ""
     CPU_CORES_COUNT = 1
-
-EPOCHS_COUNT = 100
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -235,7 +236,7 @@ class ChessEvaluationsDataset(Dataset):
                 if len(processes) >= CPU_CORES_COUNT:
                     processes.pop(0).join()
                 
-                train_chunk, test_chunk = train_test_split(chunk, test_size=0.2, random_state=15)
+                train_chunk, test_chunk = train_test_split(chunk, test_size=0.1, random_state=15)
                 chunk = test_chunk if test_data_mode else train_chunk
 
                 p = mp.Process(target=_process_chunk, args=(chunk, shared_list))
@@ -311,7 +312,7 @@ def train_loop(dataloader, model, loss_fn, optimizer):
         train_loss += loss
         batches_tested += 1
 
-    logging.info(f"Train Error: \n Avg loss: {train_loss/batches_tested:>8f} \n Test took: {time.time() - train_start_time} seconds")
+    logging.info(f"Train Error: \n Avg loss: {train_loss/batches_tested:>8f} \n Train epoch took: {time.time() - train_start_time} seconds")
     
 
 def manual_test(model):
@@ -370,7 +371,8 @@ def train_network(model, train_dataloader, test_dataloader):
 	# learning_rate = 1e-3
     learning_rate = 0.01
     # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-    optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-3)
+    # optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
     epochs = EPOCHS_COUNT
     for t in range(epochs):
         logging.info
