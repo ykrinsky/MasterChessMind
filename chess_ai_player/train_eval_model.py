@@ -24,12 +24,9 @@ from torch.utils.data import Dataset, DataLoader
 # from torchvision.transforms import ToTensor
 
 BITBOARD_SIZE = 773
-CENTIPAWN_UNIT = 100
-MAX_EVAL_SCORE = 1500
 HIDDEN_LAYER_SIZE = 1024
 DROPOUT_COUNT = 0.1
-# BATCH_SIZE = 128
-BATCH_SIZE = 512
+BATCH_SIZE = 128
 TESTSET_SIZE = 2500
 EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
 EPOCHS_COUNT = 100
@@ -156,42 +153,6 @@ def is_accurate_prediction(score: float, prediction: float) -> bool:
         return True
     
     return False
-
-
-def _preprocess_data(evaluation_file: str):
-    df = pd.read_csv(evaluation_file)
-    # Deal with ending positions and specifically mates (#). Replace by maximizing the player leading, '#+1' => +1500, and '#-3' => -1500.
-    df['Evaluation'] = df['Evaluation'].astype(str)
-    df['Evaluation'] = df['Evaluation'].str.replace(r'#\+\d+', f'+{MAX_EVAL_SCORE}', regex=True)
-    df['Evaluation'] = df['Evaluation'].str.replace(r'#-\d+', f'-{MAX_EVAL_SCORE}', regex=True)
-
-    # Convert to numeric, setting invalid values to NaN
-    df['Evaluation'] = pd.to_numeric(df['Evaluation'], errors='coerce')
-    # Drop rows with NaN values
-    df = df.dropna(subset=['Evaluation'])
-
-    # Adjust score to be not under and over the max lead score to not over impact the training.
-    df['Evaluation'] = df['Evaluation'].clip(lower=-MAX_EVAL_SCORE, upper=MAX_EVAL_SCORE)
-
-    # Convert evaluation from centipawns unit to pawns unit
-    df['Evaluation'] = df['Evaluation'].astype(int)/CENTIPAWN_UNIT
-
-    # Draw how much evaluations there are in the dataset in each score 
-    df['Evaluation_int'] = df['Evaluation'].astype(int)
-    print(df['Evaluation_int'].value_counts())
-    df['Evaluation_int'].plot(kind="hist", bins=30, title='Chess Evaluation', edgecolor='black', xlabel='Values', ylabel='Frequency')
-    plt.show()
-
-    # Sample only specific amount from each column, to balance the data.
-    # Letting the user to choose the column to sample, according to the data histogram presented to him.
-    sampling_column = int(input("Enter column for sampling: "))
-    sample_size = df['Evaluation_int'].value_counts()[sampling_column]
-    print(f"Sampling {sample_size} from each column")
-    fixed_df = df.groupby('Evaluation_int').apply(lambda eval_col: eval_col.sample(n=min(sample_size, len(eval_col)), random_state=42))
-    fixed_df['Evaluation_int'].plot(kind="hist", bins=30, title='Fixed Chess Evaluation', edgecolor='black', xlabel='Values', ylabel='Frequency')
-    plt.show()
-    fixed_df.to_csv(f"{evaluation_file}.fixed", index=False)
-    return fixed_df
 
 
 def _process_chunk(chunk, shared_list):
