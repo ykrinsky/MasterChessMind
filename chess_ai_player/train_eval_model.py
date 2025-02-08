@@ -1,27 +1,18 @@
-"""
-Finish all TODO's
-Train loss also doesn't decreases much :( check if there is a problem there.
-TODO: Fix bot.py to know if your are white or black.
-"""
 import datetime
 import time
 import os
 import logging
 import random
-import sys
 import multiprocessing as mp
 
 
 import torch
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
-# from torchvision import datasets, transforms
-# from torchvision.transforms import ToTensor
 
 BITBOARD_SIZE = 773
 HIDDEN_LAYER_SIZE = 1024
@@ -38,6 +29,7 @@ if IN_GOOGLE_COLAB:
     DATASET_SIZE = "12M"
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/merged_big_fixed_dataset.csv"
+    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/augmented_and_merged.csv"
     TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_300K.csv"
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
     CPU_CORES_COUNT = os.cpu_count()
