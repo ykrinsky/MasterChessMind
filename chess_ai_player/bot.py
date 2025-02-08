@@ -38,7 +38,7 @@ def find_best_move(board_fen: str, eval_model):
 
 if __name__ == "__main__":
 	board_fen = "r1bqkb1r/pppp1ppp/2n2n2/4p3/3P1B2/2N5/PPP1PPPP/R2QKBNR w KQkq - 2 4"
-	eval_model = torch.load('res/model.pth')
+	eval_model = torch.load('model.pth')
 	eval_model.eval() 
 	find_best_move(board_fen, eval_model)
 	board_fen = "r1bqkb1r/pppp1ppp/2n2n2/4p3/3P1B2/2N5/PPP1PPPP/R2QKBNR b KQkq - 2 4"

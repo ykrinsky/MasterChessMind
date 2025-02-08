@@ -89,7 +89,9 @@ if __name__ == "__main__":
     df_tactics = fix_evaluation_scores(pd.read_csv(r"res/tactic_evals.csv"))
 
     merged_df = pd.concat([df_big, df_random, df_tactics], ignore_index=True)
+    print(merged_df)
     print("Augmenting data with mirroring positions with a big lead")
     augmented_df = augment_with_flips(merged_df)
+    print(augmented_df)
     import IPython; IPython.embed()
     # Manually I called sample_to_fix_data(augmented_df) and chose 5, meaning ~400K sampling.

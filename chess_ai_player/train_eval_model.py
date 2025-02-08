@@ -9,16 +9,17 @@ import multiprocessing as mp
 import torch
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
 BITBOARD_SIZE = 773
-HIDDEN_LAYER_SIZE = 1024
+HIDDEN_LAYER_SIZE = 2048
 DROPOUT_COUNT = 0.1
+LEARNING_RATE = 0.01
 BATCH_SIZE = 128
-TESTSET_SIZE = 2500
 EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
 EPOCHS_COUNT = 100
 GOOD_EVAL_DIFF = 2
@@ -26,17 +27,12 @@ GOOD_EVAL_DIFF = 2
 IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 
 if IN_GOOGLE_COLAB:
-    DATASET_SIZE = "12M"
-    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
-    EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/merged_big_fixed_dataset.csv"
+    # EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
     EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/augmented_and_merged.csv"
-    TEST_EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/short_tactics_test_300K.csv"
     FILEPATH = "/content/drive/My Drive/Colab Notebooks"
     CPU_CORES_COUNT = os.cpu_count()
 else:
     EVALUATIONS_PATH = 'C:\\Users\\ykrin\\source\\repos\\chess_ai_ml\\res\\chess_eval\\short_tactics_test_10K.csv'
-    TEST_EVALUATIONS_PATH = 'C:\\Users\\ykrin\\source\\repos\\chess_ai_ml\\res\\chess_eval\\short_tactics_test_10K.csv'
-    DATASET_SIZE = 100_000
     FILEPATH = ""
     CPU_CORES_COUNT = 1
 
@@ -247,7 +243,7 @@ def train_loop(dataloader, model, loss_fn, optimizer):
     # Set the model to training mode - important for batch normalization and dropout layers
     model.train()
     train_loss = 0
-    batches_tested = 0
+    batches = 0
     for batch, (board_positions, real_evaluations) in enumerate(dataloader):
         # Compute prediction and loss
         predictions = model(board_positions)
@@ -258,14 +254,17 @@ def train_loop(dataloader, model, loss_fn, optimizer):
         optimizer.step()
         optimizer.zero_grad()
 
+        loss = loss.item()
         if batch % 1000 == 0:
-            loss, current = loss.item(), (batch + 1) * len(board_positions)
+            current = (batch + 1) * len(board_positions)
             logging.info(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
             
         train_loss += loss
-        batches_tested += 1
+        batches += 1
 
-    logging.info(f"Train Error: \n Avg loss: {train_loss/batches_tested:>8f} \n Train epoch took: {time.time() - train_start_time} seconds")
+    avg_loss = train_loss / batches
+    logging.info(f"Train Error: \n Avg loss: {avg_loss:>8f} \n Train epoch took: {time.time() - train_start_time} seconds")
+    return avg_loss
     
 
 def manual_test(model):
@@ -293,7 +292,6 @@ def test_loop(dataloader, model, loss_fn):
     samples_tested = 0
     batches_tested = 0
     in_range = 0
-    #stopping_after = 200_000
 
     # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
     # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
@@ -309,45 +307,69 @@ def test_loop(dataloader, model, loss_fn):
 
             batches_tested += 1
             samples_tested = batches_tested * dataloader.batch_size
-            #if samples_tested >= 1_000:
-            #	break
 
-    logging.info(f"Test Error: \n Avg loss: {test_loss/batches_tested:>8f} \n Test took: {time.time() - test_start_time} seconds")
+    avg_loss = test_loss / batches_tested
+    logging.info(f"Test Error: \n Avg loss: {avg_loss:>8f} \n Test took: {time.time() - test_start_time} seconds")
     logging.info(f"Good evals (by range) percentage: {in_range/samples_tested * 100:>5f}")
 
     if test_loss < 3:
         logging.info(f"Found model with avg loss of: {test_loss}, saving it.")
         save_model(model)
 
+    return avg_loss
+
+
 def train_network(model, train_dataloader, test_dataloader):
     loss_fn = nn.MSELoss()
-	# learning_rate = 1e-3
-    learning_rate = 0.01
-    # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-    # optimizer = torch.optim.Adam(model.parameters(), weight_decay=1e-3)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.002)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     epochs = EPOCHS_COUNT
+
+    train_losses = []
+    val_losses = []
+    plt.figure(figsize=(8, 5))
+    # Turn on interactive plt mode
+    plt.ion()
+
     for t in range(epochs):
-        logging.info
         logging.info(f"------------------------------- Starting epoch {t+1} -------------------------------")
-        train_loop(train_dataloader, model, loss_fn, optimizer)
+        train_loss = train_loop(train_dataloader, model, loss_fn, optimizer)
         manual_test(model)
-        test_loop(test_dataloader, model, loss_fn)
+        val_loss = test_loop(test_dataloader, model, loss_fn)
+
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
         if t % EPOCH_SAVE_INTERVAL == 0:
             save_model(model)
+
         logger = logging.getLogger()
         for handler in logger.handlers:
             handler.flush()
 
+        # Live update the plot
+        plt.clf()
+        plt.plot(range(1, t + 2), train_losses, label="Training Loss", marker='o')
+        plt.plot(range(1, t + 2), val_losses, label="Validation Loss", marker='o', linestyle="dashed")
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.title("Live Training vs. Validation Loss")
+        plt.legend()
+        plt.grid(True)
+        plt.pause(1)
 
     logging.info("Done training!")
+
+    # Turn off interactive mode and show last plot
+    plt.ioff()
+    plt.show()
 
 
 def save_model(model):
     logging.info("Saving model")
     timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     test_result = int(manual_test(model))
-    filename = os.path.join(FILEPATH, f"model-T-{test_result}-E-{EPOCHS_COUNT}-D-{DATASET_SIZE}-R-{random.randint(1, 99)}-{timestamp}.pth")
+    filename = os.path.join(FILEPATH, f"model-T-{test_result}-E-{EPOCHS_COUNT}-R-{random.randint(1, 99)}-{timestamp}.pth")
     if IN_GOOGLE_COLAB:
         torch.save(model, "/content/drive/My Drive/model_2_mil.pth")
     torch.save(model, filename)
@@ -357,6 +379,7 @@ def continue_train(model, train_data, test_data):
 	train_network(model, train_data, test_data)
 
 def setup_logging():
+    # TODO: Improves logging. Currently, it doesn't save all as planned to a file
     console_handler = logging.StreamHandler()
     log_path = os.path.join(FILEPATH,'ML_chess_training.log') if IN_GOOGLE_COLAB else 'log.txt'
     print(f"Logging in {log_path}")
@@ -369,7 +392,6 @@ def setup_logging():
     console_handler.setFormatter(formatter)
     file_handler.setFormatter(formatter)
 
-    #logger = logging.getLogger('ML_trainer_logger')
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
     logger.addHandler(console_handler)
