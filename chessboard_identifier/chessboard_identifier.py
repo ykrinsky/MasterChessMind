@@ -8,25 +8,52 @@ from transformers import ViTForImageClassification
 
 
 class Board(object):
-    '''
-    possible values for the board:
-    None: empty square
-    'PW': white pawn
-    'PB': black pawn
-    'NW': white knight
-    'NB': black knight
-    'BW': white bishop
-    'BB': black bishop
-    'RW': white rook
-    'RB': black rook
-    'QW': white queen
-    'QB': black queen
-    'KW': white king
-    'KB': black king
-    '''
+ 
     def __init__(self):
         self.board_images = [[None]*8 for _ in range(8)]
         self.board_labels = [['']*8 for _ in range(8)]
+    
+
+    def convert_to_FEN(self):
+        '''
+        convert the board to FEN string
+        note that black pieces labels start with t1_ and white pieces labels start with t2_
+        A FEN record contains six fields, each separated by a space. 
+        '''
+        def piece_name_to_fen(name):
+            pieces_dict = {
+            "pawn" : "p",
+            "knight": "n",
+            "bishop": "b",
+            "rook": "r",
+            "queen": "q",
+            "king": "k"
+            }
+            if name == "empty":
+                return "1"
+            if name[:2] == "t1":
+                name = pieces_dict[name[3:]].upper()
+            else:
+                name = pieces_dict[name[3:]].lower()
+            return name
+        FEN = ""
+        for i in range(8):
+            empty = 0
+            for j in range(8):
+                if self.board_labels[i][j] == "empty":
+                    empty += 1
+                else:
+                    if empty > 0:
+                        FEN += str(empty)
+                        empty = 0
+                    FEN += piece_name_to_fen(self.board_labels[i][j])
+            if empty > 0:
+                FEN += str(empty)
+            if i != 7:
+                FEN += "/"
+        FEN += " w - - 0 1"  # Default values for the remaining FEN fields
+        return FEN
+
 
 def smart_thresholding(image):
     '''
@@ -43,33 +70,8 @@ def smart_thresholding(image):
         w[i-1] = np.abs(v1-v2) 
     threshold = np.argmin(w)
     
-    # plt.figure(figsize=(12, 6))
-
-    # plt.subplot(1, 3, 1)
-    # plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    # plt.title("Original Image")
-    # plt.axis('off')
-
-    # plt.subplot(1, 3, 2)
-    # plt.plot(hist)
-    # plt.title("Grayscale Histogram")
-    # plt.xlabel("Pixel Value")
-    # plt.ylabel("Frequency")
-
-    # plt.subplot(1, 3, 3)
-    # plt.plot(w)
-    # plt.title("Valley Function w")
-    # plt.xlabel("Pixel Value")
-    # plt.ylabel("w Value")
-
-    # plt.tight_layout()
-    # plt.show()
-   
     return threshold, w[threshold]
-    # sc_h = np.histogramdd(np.array(imf_s), bins='auto')
 
-# def is_empty(image, other_images):
-#     # each chess board must have many
 
 class PiecesModel(object):
     def __init__(self):
@@ -155,8 +157,7 @@ class BoardIdentifier(object):
         '''
         non_empty_tiles  = []
         empty_tiles = []
-        b1 = None
-        b2 = None
+   
         for i in range(8):
             for j in range(8):
                 if board.board_labels[i][j] == "empty":
@@ -168,7 +169,6 @@ class BoardIdentifier(object):
         group_1 = []
         hist_avg1 = None
         group_2 = []
-        hist_avg = []
         hist_avgs = []
         for i in non_empty_tiles:
 
@@ -506,7 +506,8 @@ def main():
     print("[+] Identifying positions")
     board_positions = boardId.get_board_positions()
     print(board_positions)
-    
+    fen = board_positions.convert_to_FEN()
+    print(fen)
     print("[+] Done")
 
     # board = identify_board(image)
