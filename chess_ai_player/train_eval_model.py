@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.ao.quantization import quantize_dynamic
 
 HIDDEN_LAYERS_COUNT = 10
 HIDDEN_LAYER_SIZE = 2048
@@ -385,6 +386,10 @@ def save_model(model):
     if IN_GOOGLE_COLAB:
         torch.save(model, "/content/drive/My Drive/model_2_mil.pth")
     torch.save(model, filename)
+    # Saves a smaller model (used the same way but uses int8 instead of fp32). Using for uploading model to github.
+    quantized_model = quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+    torch.save(quantized_model, "model_quantized.pth")  # Save the smaller model
+
 
 
 def continue_train(model, train_data, test_data):
