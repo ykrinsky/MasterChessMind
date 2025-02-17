@@ -388,7 +388,7 @@ def save_model(model):
     torch.save(model, filename)
     # Saves a smaller model (used the same way but uses int8 instead of fp32). Using for uploading model to github.
     quantized_model = quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
-    torch.save(quantized_model, "model_quantized.pth")  # Save the smaller model
+    torch.save(quantized_model, "quantized_model.pth")  # Save the smaller model
 
 
 
