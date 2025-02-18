@@ -1,5 +1,4 @@
 import cv2
-import imutils 
 import numpy as np
 import matplotlib.pyplot as plt
 import heapq
@@ -9,25 +8,52 @@ from transformers import ViTForImageClassification
 
 
 class Board(object):
-    '''
-    possible values for the board:
-    None: empty square
-    'PW': white pawn
-    'PB': black pawn
-    'NW': white knight
-    'NB': black knight
-    'BW': white bishop
-    'BB': black bishop
-    'RW': white rook
-    'RB': black rook
-    'QW': white queen
-    'QB': black queen
-    'KW': white king
-    'KB': black king
-    '''
+ 
     def __init__(self):
         self.board_images = [[None]*8 for _ in range(8)]
         self.board_labels = [['']*8 for _ in range(8)]
+    
+
+    def convert_to_FEN(self):
+        '''
+        convert the board to FEN string
+        note that black pieces labels start with t1_ and white pieces labels start with t2_
+        A FEN record contains six fields, each separated by a space. 
+        '''
+        def piece_name_to_fen(name):
+            pieces_dict = {
+            "pawn" : "p",
+            "knight": "n",
+            "bishop": "b",
+            "rook": "r",
+            "queen": "q",
+            "king": "k"
+            }
+            if name == "empty":
+                return "1"
+            if name[:2] == "t1":
+                name = pieces_dict[name[3:]].upper()
+            else:
+                name = pieces_dict[name[3:]].lower()
+            return name
+        FEN = ""
+        for i in range(8):
+            empty = 0
+            for j in range(8):
+                if self.board_labels[i][j] == "empty":
+                    empty += 1
+                else:
+                    if empty > 0:
+                        FEN += str(empty)
+                        empty = 0
+                    FEN += piece_name_to_fen(self.board_labels[i][j])
+            if empty > 0:
+                FEN += str(empty)
+            if i != 7:
+                FEN += "/"
+        FEN += " w - - 0 1"  # Default values for the remaining FEN fields
+        return FEN
+
 
 def smart_thresholding(image):
     '''
@@ -43,11 +69,9 @@ def smart_thresholding(image):
         v2 = sum(hist[i:])
         w[i-1] = np.abs(v1-v2) 
     threshold = np.argmin(w)
+    
     return threshold, w[threshold]
-    # sc_h = np.histogramdd(np.array(imf_s), bins='auto')
 
-# def is_empty(image, other_images):
-#     # each chess board must have many
 
 class PiecesModel(object):
     def __init__(self):
@@ -95,9 +119,6 @@ class PiecesModel(object):
 
         return final_predict_labels
 
-
-
-
 class BoardIdentifier(object):
     def __init__(self, image):
         self.image = image
@@ -109,8 +130,6 @@ class BoardIdentifier(object):
         # splitted_board = self.get_splitted_board(image)
         self.identify_board()
         # should initiate self.img_canny and self.splitted_board
-        # TODO: decide if a pice is black or white.
-        # TODO: decide if there is even a piece in the square or not.
 
         np_board = np.array(self.splitted_board)
         flattened_board = np_board.reshape([np_board.shape[0]*np_board.shape[1]] + list(np_board.shape[2:]))
@@ -121,12 +140,114 @@ class BoardIdentifier(object):
             for j in range(8):
                 board.board_images[i][j] = self.splitted_board[i][j]
                 board.board_labels[i][j] = labels[i*8 + j]
-        return board
 
-    # def get_splitted_board(self, image):
-    #     (top_left, bottom_right, delim) = self.identify_board(image, image)
-    #     splitted_board = self.split_chess_board(image, top_left, bottom_right, delim)
-    #     return splitted_board
+        # TODO: decide if a pice is black or white.
+        self.assign_teams(board)
+
+        if self.debug:
+            display_board_image(self.splitted_board, np.array(board.board_labels).flatten())
+
+        return board
+ 
+    def assign_teams(self, board):
+        '''
+        given a labeled pieces board, assign teams to pieces.
+        do this by looking at the histogram of the pieces and dividing them into two groups.
+        This changes the labels of board. 
+        '''
+        non_empty_tiles  = []
+        empty_tiles = []
+   
+        for i in range(8):
+            for j in range(8):
+                if board.board_labels[i][j] == "empty":
+                    empty_tiles.append((self.splitted_board[i][j], (i,j)))
+                else:
+
+                    non_empty_tiles.append((self.splitted_board[i][j], (i,j)))
+
+        group_1 = []
+        hist_avg1 = None
+        group_2 = []
+        hist_avgs = []
+        for i in non_empty_tiles:
+
+            # first remove all backgroung from histogram
+            # TODO: this can be slightly more efficient if i do one time calculation of all non-unique empty tiles and subtract that array.
+            tmp_array = i[0].copy()
+            for et in empty_tiles:
+                diff = tmp_array - et[0]
+                mask = np.all(diff < 10, axis=-1)
+                tmp_array[mask] = 0
+
+            # use morpholigical erosion to remove noise around the pieces which remains from the background removal
+            gs = cv2.cvtColor(tmp_array, cv2.COLOR_BGR2GRAY)
+            kernel = np.ones((5,5), np.uint8)
+            gs = cv2.erode(gs, kernel, iterations=1)
+
+            # take average non-zero pixel value using histogram
+            hist = cv2.calcHist([gs], [0], None, [256], [0, 256])
+            hist_sum = sum([k*z for k,z in enumerate(hist)])
+            curr_hist_avg = hist_sum / np.sum(hist[5:])
+            hist_avgs.append(curr_hist_avg)
+            
+            print(f"for {i[1]} got  hist sum - {hist_sum}, hist avg - {curr_hist_avg}") 
+
+
+            # plt.figure(figsize=(12, 4))
+            # plt.subplot(1, 4, 1)
+            # plt.imshow(gs, cmap='gray')
+            # plt.title(f"Grayscale Image at {i[1]}")
+            # plt.axis('off')
+
+            # plt.subplot(1, 4, 2)
+            # plt.imshow(cv2.cvtColor(i[0], cv2.COLOR_BGR2RGB))
+            # plt.title(f"Original Image at {i[1]}")
+            # plt.axis('off')
+
+            # plt.subplot(1, 4, 3)
+            # plt.imshow(cv2.cvtColor(tmp_array, cv2.COLOR_BGR2RGB))
+            # plt.title(f"Processed Image at {i[1]}")
+            # plt.axis('off')
+
+            # plt.subplot(1, 4, 4)
+            # plt.plot(hist)
+            # plt.title("Histogram after Background Removal")
+            # plt.xlabel("Pixel value")
+            # plt.ylabel("Frequency")
+           
+
+            # plt.tight_layout()
+            # plt.show()
+            
+            if hist_avg1 is None:
+                group_1.append(i[1])
+                hist_avg1 = curr_hist_avg
+                continue
+            
+            if hist_avg1 + 20 > curr_hist_avg and  curr_hist_avg > hist_avg1 - 20:
+                group_1.append(i[1])
+            else:
+                group_2.append(i[1])
+            
+        for piece in group_1:
+            i,j = piece
+            board.board_labels[i][j] = "t1_" + board.board_labels[i][j]
+        for piece in group_2:
+            i,j = piece
+            board.board_labels[i][j] = "t2_" + board.board_labels[i][j] 
+    
+        # plt.figure(figsize=(12, 6))
+        # plt.scatter(range(len(hist_avgs)), hist_avgs)
+        # for idx, (hist_avg, loc) in enumerate(zip(hist_avgs, [i[1] for i in non_empty_tiles])):
+        #     plt.annotate(f"{loc}", (idx, hist_avg))
+        # plt.title("Histogram Averages")
+        # plt.xlabel("Piece Index")
+        # plt.ylabel("Histogram Average")
+        # plt.tight_layout()
+        # plt.show()
+
+
 
     def identify_board(self):
         # For this we will convert the image into black and white - to make it easier to identify borders.
@@ -164,11 +285,13 @@ class BoardIdentifier(object):
         # cv2.waitKey(0)
         self.splitted_board = split_chess_board(self.image, top_left, bottom_right, delim)
         self.img_canny = img_canny
-        display_board_image(self.splitted_board)
+        # display_board_image(self.splitted_board)
         # save_board_images(splitted_board, "test_image")
         print("drawing square - ", (top_left, bottom_right, delim))
         
         return (top_left, bottom_right, delim)
+
+
 
 def draw_on_image(mask_img, original_image, color):
     # for every pixel which is not zero in the mask_image, draw a point in the original image - 
@@ -379,9 +502,12 @@ def main():
     print("[+] loading image")
     image = cv2.imread('chessboard_identifier/res/board_webpage.png')
     print("[+] Initializing board")
-    board = BoardIdentifier(image)
+    boardId = BoardIdentifier(image)
     print("[+] Identifying positions")
-    board.get_board_positions()
+    board_positions = boardId.get_board_positions()
+    print(board_positions)
+    fen = board_positions.convert_to_FEN()
+    print(fen)
     print("[+] Done")
 
     # board = identify_board(image)
