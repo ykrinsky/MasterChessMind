@@ -27,6 +27,7 @@ MAX_EPOCHS = 100
 EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
 BITBOARD_SIZE = 773
 
+
 IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
