@@ -13,18 +13,23 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 from torch import nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from torch.ao.quantization import quantize_dynamic
 
-BITBOARD_SIZE = 773
+HIDDEN_LAYERS_COUNT = 10
 HIDDEN_LAYER_SIZE = 2048
-DROPOUT_COUNT = 0.1
+DROPOUT_COUNT = 0.3
 LEARNING_RATE = 0.01
-BATCH_SIZE = 128
-EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
-EPOCHS_COUNT = 100
+BATCH_SIZE = 1024
 GOOD_EVAL_DIFF = 2
+MAX_EPOCHS = 100
+EPOCH_SAVE_INTERVAL = 3 # TODO: Find something better than this mechanism
+BITBOARD_SIZE = 773
+
 
 IN_GOOGLE_COLAB = True if os.getenv("COLAB_RELEASE_TAG") else False
+DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 if IN_GOOGLE_COLAB:
     # EVALUATIONS_PATH = "/content/drive/My Drive/Colab Notebooks/res/chessData100K.csv"
@@ -35,8 +40,6 @@ else:
     EVALUATIONS_PATH = 'C:\\Users\\ykrin\\source\\repos\\chess_ai_ml\\res\\chess_eval\\short_tactics_test_10K.csv'
     FILEPATH = ""
     CPU_CORES_COUNT = 1
-
-DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 
 def fen_to_bitboard(fen: str):
@@ -217,24 +220,35 @@ class ChessEvaluationsDataset(Dataset):
         return self.fens_tensor[index].to(torch.float32), self.evals_tensor[index].to(torch.float32)
 
 
-class NeuralNetwork(nn.Module):
-    def __init__(self):
+class ChessEvalNet(nn.Module):
+    def __init__(self, input_size=BITBOARD_SIZE, hidden_size=HIDDEN_LAYER_SIZE, num_layers=HIDDEN_LAYERS_COUNT, dropout=DROPOUT_COUNT):
         super().__init__()
-        self.linear_relu_stack = nn.Sequential(
-            nn.Linear(in_features=BITBOARD_SIZE, out_features=HIDDEN_LAYER_SIZE),
-            nn.ReLU(),
-            nn.Dropout(p=DROPOUT_COUNT),
-            nn.Linear(in_features=HIDDEN_LAYER_SIZE, out_features=HIDDEN_LAYER_SIZE),
-            nn.ReLU(),
-            nn.Dropout(p=DROPOUT_COUNT),
-            nn.Linear(in_features=HIDDEN_LAYER_SIZE, out_features=1),
-        )
+
+        self.input_layer = nn.Linear(input_size, hidden_size)
+        self.hidden_layers = nn.ModuleList([nn.Linear(hidden_size, hidden_size) for _ in range(num_layers)])
+        self.batch_norms = nn.ModuleList([nn.BatchNorm1d(hidden_size) for _ in range(num_layers)])
+        self.output_layer = nn.Linear(hidden_size, 1) 
+
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x):
-        """The forward passing of an element through the network"""
-        logits = self.linear_relu_stack(x)
-        return logits
+        """The forward passing of an element or a batch through the network"""
+        # Ensure x is 2D (batch_size, input_size) for the linear layer
+        if x.dim() == 1:
+            x = x.unsqueeze(0)  # Add batch dimension if missing (1D input)
 
+        x = F.leaky_relu(self.input_layer(x))  # Input layer with LeakyReLU
+        
+        for layer, bn in zip(self.hidden_layers, self.batch_norms):
+            residual = x  # Save input for residual connection
+            x = layer(x)
+            x = bn(x)  # Apply batch normalization
+            x = F.leaky_relu(x)
+            x = self.dropout(x)
+            x += residual  # Residual connection (Skip Connection)
+
+        x = self.output_layer(x)  # No activation, unrestricted output
+        return x  
 
 
 def train_loop(dataloader, model, loss_fn, optimizer):
@@ -322,7 +336,7 @@ def test_loop(dataloader, model, loss_fn):
 def train_network(model, train_dataloader, test_dataloader):
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    epochs = EPOCHS_COUNT
+    epochs = MAX_EPOCHS
 
     train_losses = []
     val_losses = []
@@ -369,10 +383,14 @@ def save_model(model):
     logging.info("Saving model")
     timestamp = datetime.datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     test_result = int(manual_test(model))
-    filename = os.path.join(FILEPATH, f"model-T-{test_result}-E-{EPOCHS_COUNT}-R-{random.randint(1, 99)}-{timestamp}.pth")
+    filename = os.path.join(FILEPATH, f"model-T-{test_result}-E-{MAX_EPOCHS}-R-{random.randint(1, 99)}-{timestamp}.pth")
     if IN_GOOGLE_COLAB:
         torch.save(model, "/content/drive/My Drive/model_2_mil.pth")
     torch.save(model, filename)
+    # Saves a smaller model (used the same way but uses int8 instead of fp32). Using for uploading model to github.
+    quantized_model = quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
+    torch.save(quantized_model, "quantized_model.pth")  # Save the smaller model
+
 
 
 def continue_train(model, train_data, test_data):
@@ -415,6 +433,6 @@ if __name__ == "__main__":
     train_dataloader = DataLoader(chess_dataset, batch_size=BATCH_SIZE, shuffle=True)
     chess_test_dataset = ChessEvaluationsDataset(EVALUATIONS_PATH, test_data_mode=True)
     test_dataloader = DataLoader(chess_test_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    model = NeuralNetwork().to(DEVICE)
+    model = ChessEvalNet().to(DEVICE)
     train_network(model, train_dataloader, test_dataloader)
     save_model(model)
